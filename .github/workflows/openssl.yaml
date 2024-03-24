@@ -1,8 +1,5 @@
 name: Build openSSL Windows Temp
 on:
-  push:
-    branches:
-      - main
   workflow_call:
     inputs:
       openSslVersion:
@@ -11,7 +8,7 @@ on:
         default: "1.1.1w"
         type: string
       nasmVersion:
-        description: "NASM version (Required to utilize assember module), eg 2.15.05"
+        description: "NASM version (Required to utilize assember module for windows), eg 2.15.05"
         required: true
         default: "2.15.05"
         type: string
@@ -24,7 +21,7 @@ on:
         default: "1.1.1w"
         type: string
       nasmVersion:
-        description: "NASM version (Required to utilize assember module), eg 2.15.05"
+        description: "NASM version (Required to utilize assember module for windows), eg 2.15.05"
         required: true
         default: "2.15.05"
         type: string
@@ -37,9 +34,9 @@ jobs:
       matrix:
         configs:
           - release
-        target:
-          - win64
-          - win32
+        targets:
+          - x86
+          - x64
     env:
       OPENSSL_VERSION: ${{ startsWith(github.event_name, 'workflow_') && github.event.inputs.openSslVersion || '1.1.1w' }}
       NASM_VERSION: ${{ startsWith(github.event_name, 'workflow_') && github.event.inputs.nasmVersion || '2.15.05' }}
@@ -48,43 +45,43 @@ jobs:
         id: setup
         shell: pwsh
         run: |
-          $outPath = Join-Path -Path $pwd -ChildPath "out"
-          $libPath = Join-Path -Path $outPath -ChildPath "winnt-${{matrix.configs}}-${{matrix.target}}"
-          $winTarget = "winnt-${{matrix.configs}}-${{matrix.target}}"
           $outPath = "out"
+          $winTarget = "winnt-${{ matrix.targets }}-${{ matrix.configs }}"
           $libPath = Join-Path -Path $outPath -ChildPath $winTarget
           mkdir $libPath
           echo "libPath=$libPath" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
           $absLibPath = Join-Path -Path $pwd -ChildPath $libPath
           echo "absLibPath=$absLibPath" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          $openSslName = "openssl-${{ env.OPENSSL_VERSION }}"
-          echo "OpenSslFile=$openSslName" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
-          echo "OpenSslPkg=${openSslName}.tar.gz" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $OpenSslFile = "openssl-${{ env.OPENSSL_VERSION }}"
+          echo "OpenSslFile=$OpenSslFile" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          echo "OpenSslPkg=${OpenSslFile}.tar.gz" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          $nasmName = "nasm-${{ env.NASM_VERSION }}"
-          echo "NasmFile=${nasmName}" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
-          echo "NasmPkg=${nasmName}-${{ matrix.target }}.zip" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $nasmFile = "nasm-${{ env.NASM_VERSION }}"
+          echo "NasmFile=${nasmFile}" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $target = If ( "${{ matrix.targets }}" -eq "x64" ) {"win64"} Else {"win32"}
+          echo "NasmTarget=${target}" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          echo "NasmPkg=${nasmFile}-${target}.zip" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
       - name: Setup perl
-        uses: shogo82148/actions-setup-perl@v1
+        uses: shogo82148/actions-setup-perl@v1.29.0
         with:
           perl-version: '5.32'
           distribution: strawberry
       
       - name: Enable Developer Command Prompt for Microsoft Visual C++ (vcvarsall)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
-          arch: ${{matrix.target}}
+          arch: ${{ matrix.targets }}
 
       - name: Download openssl and NASM source
         shell: pwsh
         run: |
           Invoke-WebRequest -OutFile ${{ steps.setup.outputs.OpenSslPkg }} -Uri https://www.openssl.org/source/${{ steps.setup.outputs.OpenSslPkg }}
-          Invoke-WebRequest -OutFile ${{ steps.setup.outputs.NasmPkg }} -Uri https://www.nasm.us/pub/nasm/releasebuilds/${{ env.NASM_VERSION }}/${{ matrix.target }}/${{ steps.setup.outputs.NasmPkg }}
+          Invoke-WebRequest -OutFile ${{ steps.setup.outputs.NasmPkg }} -Uri https://www.nasm.us/pub/nasm/releasebuilds/${{ env.NASM_VERSION }}/${{ steps.setup.outputs.NasmTarget }}/${{ steps.setup.outputs.NasmPkg }}
 
       - name: Extract OpenSSL and NASM
         shell: pwsh
@@ -97,33 +94,37 @@ jobs:
       - name: Configure OpenSSL build
         shell: pwsh
         env:
-          TARGET: ${{ matrix.target == 'win64' && 'VC-WIN64A' || 'VC-WIN32' }}
+          TARGET_ARC: ${{ matrix.targets == 'x64' && 'VC-WIN64A' || 'VC-WIN32' }}
         working-directory: out\${{ steps.setup.outputs.OpenSslFile }}
         run: |
-          perl Configure --${{matrix.configs}} ${{ env.TARGET }} no-shared no-autoload-config --prefix=${{steps.setup.outputs.absLibPath}} --openssldir=${{steps.setup.outputs.absLibPath}}
+          perl Configure --${{ matrix.configs }} ${{ env.TARGET_ARC }} no-shared no-autoload-config --prefix=${{ steps.setup.outputs.absLibPath }} --openssldir=${{ steps.setup.outputs.absLibPath }}
+
+      - name: Configure OpenSSL build - dump
+        shell: pwsh
+        working-directory: out\${{ steps.setup.outputs.OpenSslFile }}
+        run: |
           perl configdata.pm --dump
 
-      - name: Compile OpenSSL
+      - name: nmake OpenSSL
         shell: pwsh
         working-directory: out\${{ steps.setup.outputs.OpenSslFile }}
         run: |
           nmake
-          nmake install
 
-      - name: Check created libs
+      - name: nmake install OpenSSL
         shell: pwsh
-        working-directory: ${{steps.setup.outputs.libPath}}
+        working-directory: out\${{ steps.setup.outputs.OpenSslFile }}
         run: |
-          Get-ChildItem -Recurse
+          nmake install
 
       - name: Archive openSSL libs artifacts
         uses: actions/upload-artifact@v4.3.1
         with:
-          name: openssl-${{matrix.target}}
+          name: openssl-win-${{ matrix.targets }}-${{ matrix.configs }}
           path: |
-            ${{steps.setup.outputs.libPath}}/*.cnf
-            ${{steps.setup.outputs.libPath}}/*.cnf.dist
-            ${{steps.setup.outputs.libPath}}/bin
-            ${{steps.setup.outputs.libPath}}/include
-            ${{steps.setup.outputs.libPath}}/lib
-            ${{steps.setup.outputs.libPath}}/misc
+            ${{ steps.setup.outputs.libPath }}/*.cnf
+            ${{ steps.setup.outputs.libPath }}/*.cnf.dist
+            ${{ steps.setup.outputs.libPath }}/bin
+            ${{ steps.setup.outputs.libPath }}/include
+            ${{ steps.setup.outputs.libPath }}/lib
+            ${{ steps.setup.outputs.libPath }}/misc
