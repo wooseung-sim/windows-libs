@@ -34,6 +34,7 @@ jobs:
       matrix:
         configs:
           - release
+          - debug
         targets:
           - x86
           - x64

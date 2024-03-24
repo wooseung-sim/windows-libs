@@ -37,6 +37,7 @@ jobs:
       matrix:
         configs:
           - release
+          - debug
         targets:
           - x86
           - x64
@@ -58,9 +59,14 @@ jobs:
           $sslDir = Join-Path -Path $pwd -ChildPath "openssl"
           echo "sslDir=$sslDir" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          mkdir out
+          $outPath = "out"
+          mkdir $outPath
+          echo "outPath=$outPath" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           $curlPath = Join-Path -Path "out" -ChildPath $curlFile
+          $winbuildPath = Join-Path -Path $curlPath -ChildPath "winbuild"
+          echo "winbuildPath=$winbuildPath" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+
           $buildsPath = Join-Path -Path $curlPath -ChildPath "builds"
           $libName = "libcurl-vc${{ env.VC_VER }}-${{ matrix.targets }}-${{ matrix.configs }}-${{ env.MODE }}-ssl-${{ env.SSL_MODE }}-ipv6-sspi"
           $libPath = Join-Path -Path $buildsPath -ChildPath $libName
@@ -81,7 +87,7 @@ jobs:
 
       - name: Extract Curl
         shell: pwsh
-        working-directory: out
+        working-directory: ${{ steps.setup.outputs.outPath }}
         run: |
           tar -xf ..\${{ steps.setup.outputs.curlPkg }}
 
@@ -93,14 +99,9 @@ jobs:
 
       - name: nmake Curl
         shell: pwsh
-        working-directory: out\${{ steps.setup.outputs.curlFile }}\winbuild
+        working-directory: ${{ steps.setup.outputs.winbuildPath }}
         run: |
           nmake /f Makefile.vc mode=$Env:MODE VC=$Env:VC_VER GEN_PDB=no WITH_SSL=$Env:SSL_MODE ENABLE_IPV6=yes ENABLE_IDN=no DEBUG=${{ matrix.configs == 'debug' && 'yes' || 'no' }} MACHINE=${{ matrix.targets }} ENABLE_SPNEGO=no ENABLE_OPENSSL_AUTO_LOAD_CONFIG=no WITH_DEVEL=${{ steps.setup.outputs.sslDir }}
-
-      - name: show artifacts
-        shell: pwsh
-        run: |
-          Get-ChildItem -Directory -Recurse
 
       - name: show artifacts
         shell: pwsh
