@@ -39,6 +39,7 @@ jobs:
           - release
         target:
           - win64
+          - win32
     env:
       OPENSSL_VERSION: ${{ startsWith(github.event_name, 'workflow_') && github.event.inputs.openSslVersion || '1.1.1w' }}
       NASM_VERSION: ${{ startsWith(github.event_name, 'workflow_') && github.event.inputs.nasmVersion || '2.15.05' }}
@@ -115,6 +116,14 @@ jobs:
         run: |
           Get-ChildItem -Recurse
 
-      
-
-      
+      - name: Archive openSSL libs artifacts
+        uses: actions/upload-artifact@v4.3.1
+        with:
+          name: openssl-${{matrix.target}}
+          path: |
+            ${{steps.setup.outputs.libPath}}/*.cnf
+            ${{steps.setup.outputs.libPath}}/*.cnf.dist
+            ${{steps.setup.outputs.libPath}}/bin
+            ${{steps.setup.outputs.libPath}}/include
+            ${{steps.setup.outputs.libPath}}/lib
+            ${{steps.setup.outputs.libPath}}/misc
