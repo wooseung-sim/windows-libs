@@ -1,0 +1,120 @@
+name: Build openSSL Windows Temp
+on:
+  push:
+    branches:
+      - main
+  workflow_call:
+    inputs:
+      openSslVersion:
+        description: "OpenSSL version to download and build, eg 1.1.1w"
+        required: true
+        default: "1.1.1w"
+        type: string
+      nasmVersion:
+        description: "NASM version (Required to utilize assember module), eg 2.15.05"
+        required: true
+        default: "2.15.05"
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      openSslVersion:
+        description: "OpenSSL version to download and build, eg 1.1.1w"
+        required: true
+        default: "1.1.1w"
+        type: string
+      nasmVersion:
+        description: "NASM version (Required to utilize assember module), eg 2.15.05"
+        required: true
+        default: "2.15.05"
+        type: string
+
+jobs:
+  openssl-windows:
+    name: Build OpenSSL Windows
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        configs:
+          - release
+        target:
+          - win64
+    env:
+      OPENSSL_VERSION: ${{ startsWith(github.event_name, 'workflow_') && github.event.inputs.openSslVersion || '1.1.1w' }}
+      NASM_VERSION: ${{ startsWith(github.event_name, 'workflow_') && github.event.inputs.nasmVersion || '2.15.05' }}
+    steps:
+      - name: Set variables
+        id: setup
+        shell: pwsh
+        run: |
+          $outPath = Join-Path -Path $pwd -ChildPath "out"
+          $libPath = Join-Path -Path $outPath -ChildPath "winnt-${{matrix.configs}}-${{matrix.target}}"
+          $winTarget = "winnt-${{matrix.configs}}-${{matrix.target}}"
+          $outPath = "out"
+          $libPath = Join-Path -Path $outPath -ChildPath $winTarget
+          mkdir $libPath
+          echo "libPath=$libPath" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $absLibPath = Join-Path -Path $pwd -ChildPath $libPath
+          echo "absLibPath=$absLibPath" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          $openSslName = "openssl-${{ env.OPENSSL_VERSION }}"
+          echo "OpenSslFile=$openSslName" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          echo "OpenSslPkg=${openSslName}.tar.gz" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          $nasmName = "nasm-${{ env.NASM_VERSION }}"
+          echo "NasmFile=${nasmName}" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+          echo "NasmPkg=${nasmName}-${{ matrix.target }}.zip" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.32'
+          distribution: strawberry
+      
+      - name: Enable Developer Command Prompt for Microsoft Visual C++ (vcvarsall)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{matrix.target}}
+
+      - name: Download openssl and NASM source
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -OutFile ${{ steps.setup.outputs.OpenSslPkg }} -Uri https://www.openssl.org/source/${{ steps.setup.outputs.OpenSslPkg }}
+          Invoke-WebRequest -OutFile ${{ steps.setup.outputs.NasmPkg }} -Uri https://www.nasm.us/pub/nasm/releasebuilds/${{ env.NASM_VERSION }}/${{ matrix.target }}/${{ steps.setup.outputs.NasmPkg }}
+
+      - name: Extract OpenSSL and NASM
+        shell: pwsh
+        working-directory: out
+        run: |
+          tar -xf ..\${{ steps.setup.outputs.OpenSslPkg }}
+          tar -xf ..\${{ steps.setup.outputs.NasmPkg }}
+          "$pwd\${{ steps.setup.outputs.NasmFile }}" >> $Env:GITHUB_PATH
+
+      - name: Configure OpenSSL build
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target == 'win64' && 'VC-WIN64A' || 'VC-WIN32' }}
+        working-directory: out\${{ steps.setup.outputs.OpenSslFile }}
+        run: |
+          perl Configure --${{matrix.configs}} ${{ env.TARGET }} no-shared no-autoload-config --prefix=${{steps.setup.outputs.absLibPath}} --openssldir=${{steps.setup.outputs.absLibPath}}
+          perl configdata.pm --dump
+
+      - name: Compile OpenSSL
+        shell: pwsh
+        working-directory: out\${{ steps.setup.outputs.OpenSslFile }}
+        run: |
+          nmake
+          nmake install
+
+      - name: Check created libs
+        shell: pwsh
+        working-directory: ${{steps.setup.outputs.libPath}}
+        run: |
+          Get-ChildItem -Recurse
+
+      
+
+      
