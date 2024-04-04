@@ -1,0 +1,188 @@
+name: Build libcurl - temp-android
+on:
+  workflow_dispatch:
+    inputs:
+      openSslVersion:
+        description: "OpenSSL version to download and build, eg 1.1.1w"
+        required: true
+        default: "1.1.1w"
+        type: string
+      nasmVersion:
+        description: "NASM version (Required to utilize assember module for openssl windows), eg 2.15.05"
+        required: true
+        default: "2.15.05"
+        type: string
+      curlVersion:
+        description: "Curl version to download and build, eg 8.5.0"
+        required: true
+        default: "8.5.0"
+        type: string
+
+jobs:
+  curl-android:
+    name: Build Curl Android with OpenSSL
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        architecture:
+          - arm
+          - arm64
+    env:
+      CURL_ARCHIVE_NAME: "curl-${{ github.event_name == 'workflow_dispatch' && inputs.curlVersion || '8.5.0' }}"
+      SSL_ARCHIVE_NAME: "openssl-${{ inputs.openSslVersion }}"
+      COMMON_FLAGS: "-fpic -ffunction-sections -funwind-tables -fstack-protector -fno-strict-aliasing -finline-limit=64"
+      API_LEVEL: "24"
+    steps:
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1.4.2
+        with:
+          ndk-version: r21e
+          add-to-path: false
+
+      - name: Install required tools/libs
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            curl \
+            build-essential
+      
+      - name: Setup variables
+        id: setup
+        shell: bash
+        run: |
+          SSL_PATH=openssl/android-${{ matrix.architecture }}
+          mkdir -p ${SSL_PATH}
+          echo "ssl-path=${SSL_PATH}" | tee -a $GITHUB_OUTPUT
+
+          OUT_PATH=out/android-${{ matrix.architecture }}
+          mkdir -p ${OUT_PATH}
+          echo "out-path=${OUT_PATH}" | tee -a $GITHUB_OUTPUT
+
+          echo "cpp-flags=${COMMON_FLAGS} -D__ANDROID_API__=${API_LEVEL}" | tee -a $GITHUB_OUTPUT
+          echo "cxx-flags=${COMMON_FLAGS} -frtti -fexceptions" | tee -a $GITHUB_OUTPUT
+          
+          if [ "${{ matrix.architecture }}" == "arm64" ]; then
+            TARGET_ARCH=aarch64
+            echo "bin-prefix=aarch64-linux-android" | tee -a $GITHUB_OUTPUT
+            echo "clang-prefix=aarch64-linux-android" | tee -a $GITHUB_OUTPUT
+          else
+            TARGET_ARCH=arm
+            echo "bin-prefix=arm-linux-androideabi" | tee -a $GITHUB_OUTPUT
+            echo "clang-prefix=armv7a-linux-androideabi" | tee -a $GITHUB_OUTPUT
+          fi
+
+          TOOLCHAIN_PATH=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains
+          KERNEL_ARCH=$(echo "$(uname -s)-x86_64" | tr '[:upper:]' '[:lower:]')
+          LLVM_BIN_PATH=${TOOLCHAIN_PATH}/llvm/prebuilt/${KERNEL_ARCH}/bin
+          TARGET_BIN_PATH=${TOOLCHAIN_PATH}/${TARGET_ARCH}-linux-androideabi-4.9/prebuilt/${KERNEL_ARCH}/bin
+          echo "llvm-bin-path=${LLVM_BIN_PATH}" | tee -a $GITHUB_OUTPUT
+          echo "target-bin-path=${TARGET_BIN_PATH}" | tee -a $GITHUB_OUTPUT
+
+      - name: Download OSS OpenSSL source code
+        shell: bash
+        working-directory: ${{ steps.setup.outputs.ssl-path }}
+        env:
+          ARCHIVE_FILE: "${{ env.SSL_ARCHIVE_NAME }}.tar.gz"
+        run: |
+          curl -f -o ${ARCHIVE_FILE} https://www.openssl.org/source/${ARCHIVE_FILE}
+          ARCHIVE_FILEPATH=$(realpath ${ARCHIVE_FILE})
+          tar -xzf ${ARCHIVE_FILEPATH}
+          rm ${ARCHIVE_FILEPATH}
+      
+      - name: Configure and build OpenSSL
+        shell: bash
+        working-directory: ${{ steps.setup.outputs.ssl-path }}/${{ env.SSL_ARCHIVE_NAME }}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_TOOLCHAIN_LLVM: ${{ steps.setup.outputs.llvm-bin-path }}
+          ANDROID_TOOLCHAIN_TARET: ${{ steps.setup.outputs.target-bin-path }}
+          CPPFLAGS: ${{ steps.setup.outputs.cpp-flags }}
+          CXXFLAGS: ${{ steps.setup.outputs.cxx-flags }}
+        run: |
+          LIB_OUT=$(realpath ..)
+          export CC=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.clang-prefix }}${API_LEVEL}-clang
+          export CXX=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.clang-prefix }}${API_LEVEL}-clang++
+          export AR=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ar
+          export AS=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-as
+          export LD=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ld
+          export RANLIB=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ranlib
+          export STRIP=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-strip
+
+          echo "Set PATH to have NDK bins prior to clang (default PATH), otherwise configure picks up android-gcc which has been deprecated and removed from NDK."
+          echo "ref> https://github.com/openssl/openssl/blob/master/NOTES-ANDROID.md"
+          PATH=${ANDROID_TOOLCHAIN_LLVM}:${ANDROID_TOOLCHAIN_TARET}:$PATH
+
+          ./Configure \
+            android-${{ matrix.architecture }} \
+            no-dso \
+            no-shared \
+            no-autoload-config \
+            --prefix=${LIB_OUT} \
+            --openssldir=${LIB_OUT}/ssl
+          ./configdata.pm --dump
+          make
+          make install
+
+      - name: Upload OpenSSL built artifacts
+        uses: actions/upload-artifact@v4.3.1
+        with:
+          name: openssl-android-${{ matrix.architecture }}
+          path: |
+            ${{ steps.setup.outputs.ssl-path }}/lib
+            ${{ steps.setup.outputs.ssl-path }}/ssl
+            ${{ steps.setup.outputs.ssl-path }}/include
+
+      - name: Download OSS Curl source code
+        shell: bash
+        working-directory: ${{ steps.setup.outputs.out-path }}
+        env:
+          ARCHIVE_FILE: "${{ env.CURL_ARCHIVE_NAME }}.tar.gz"
+        run: |
+          curl -f -o ${ARCHIVE_FILE} https://curl.se/download/${ARCHIVE_FILE}
+          ARCHIVE_FILEPATH=$(realpath ${ARCHIVE_FILE})
+          tar -xzf ${ARCHIVE_FILEPATH}
+          rm ${ARCHIVE_FILEPATH}
+
+      - name: Configure and build Curl
+        shell: bash
+        working-directory: ${{ steps.setup.outputs.out-path }}/${{env.CURL_ARCHIVE_NAME}}
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_TOOLCHAIN_LLVM: ${{ steps.setup.outputs.llvm-bin-path }}
+          ANDROID_TOOLCHAIN_TARET: ${{ steps.setup.outputs.target-bin-path }}
+          CPPFLAGS: ${{ steps.setup.outputs.cpp-flags }}
+          CXXFLAGS: ${{ steps.setup.outputs.cxx-flags }}
+        run: |
+          LIB_OUT=$(realpath ..)
+          SSL_DIR=${GITHUB_WORKSPACE}/${{ steps.setup.outputs.ssl-path }}
+          export CC=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.clang-prefix }}${API_LEVEL}-clang
+          export CXX=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.clang-prefix }}${API_LEVEL}-clang++
+          export AR=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ar
+          export AS=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-as
+          export LD=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ld
+          export RANLIB=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ranlib
+          export STRIP=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-strip
+
+          echo "Set PATH to have NDK bins prior to clang (default PATH), otherwise configure picks up android-gcc which has been deprecated and removed from NDK."
+          PATH=${ANDROID_TOOLCHAIN_LLVM}:${ANDROID_TOOLCHAIN_TARET}:$PATH
+
+          ./configure \
+            --host=${{ matrix.architecture }}-linux-android \
+            --target=${{ matrix.architecture }}-linux-android \
+            --with-openssl=${SSL_DIR} \
+            --disable-shared \
+            --without-zlib \
+            --disable-ldap \
+            --prefix=${LIB_OUT}
+          make
+          make install
+
+      - name: Upload Curl built artifacts
+        uses: actions/upload-artifact@v4.3.1
+        with:
+          name: curl-android-${{ matrix.architecture }}
+          path: |
+            ${{ steps.setup.outputs.out-path }}/lib
+            ${{ steps.setup.outputs.out-path }}/include

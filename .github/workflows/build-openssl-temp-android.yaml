@@ -1,0 +1,147 @@
+---
+name: Build openSSL - temp android
+on:
+  workflow_call:
+    inputs:
+      openSslVersion:
+        description: "OpenSSL version to download and build, eg 1.1.1w"
+        required: true
+        default: "1.1.1w"
+        type: string
+      nasmVersion:
+        description: "NASM version (Required to utilize assember module for windows), eg 2.15.05"
+        required: false
+        default: "2.15.05"
+        type: string
+      platform:
+        description: "Target platform to build (all/linux/osx/windows) (all for all platforms)"
+        required: true
+        default: "all"
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      openSslVersion:
+        description: "OpenSSL version to download and build, eg 1.1.1w"
+        required: true
+        default: "1.1.1w"
+        type: string
+      nasmVersion:
+        description: "NASM version (Required to utilize assember module for windows), eg 2.15.05"
+        required: true
+        default: "2.15.05"
+        type: string
+      platform:
+        description: "Target platform to build (all for all platforms)"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - linux
+          - osx
+          - windows
+          - android
+
+jobs:
+  openssl-android:
+    name: Build OpenSSL Android
+    if: ${{ inputs.platform == 'android' || inputs.platform == 'all' }}
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        architecture:
+          - arm
+          - arm64
+    env:
+      ARCHIVE_NAME: "openssl-${{ inputs.openSslVersion }}"
+    steps:
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1.4.2
+        with:
+          ndk-version: r21e
+          add-to-path: false
+
+      - name: Install required tools/libs
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            curl \
+            build-essential
+
+      - name: Download OSS OpenSSL source code
+        id: setup
+        shell: bash
+        env:
+          ARCHIVE_FILE: "${{env.ARCHIVE_NAME}}.tar.gz"
+        run: |
+          curl -f -o ${ARCHIVE_FILE} https://www.openssl.org/source/${ARCHIVE_FILE}
+          ARCHIVE_FILEPATH=$(realpath ${ARCHIVE_FILE})
+          OUT_PATH=out/android-${{ matrix.architecture }}
+          mkdir -p ${OUT_PATH}
+          cd ${OUT_PATH}
+          tar -xzf ${ARCHIVE_FILEPATH}
+          echo "out-path=${OUT_PATH}" | tee -a $GITHUB_OUTPUT
+
+          KERNEL_ARCH=$(echo "$(uname -s)-x86_64" | tr '[:upper:]' '[:lower:]')
+          echo "kernel-arch=${KERNEL_ARCH}" | tee -a $GITHUB_OUTPUT
+
+          echo "toolchain=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains" | tee -a $GITHUB_OUTPUT
+
+          if [ "${{ matrix.architecture }}" == "arm64" ]; then
+            echo "target-arch=aarch64" | tee -a $GITHUB_OUTPUT
+            echo "bin-prefix=aarch64-linux-android" | tee -a $GITHUB_OUTPUT
+            echo "clang-prefix=aarch64-linux-android" | tee -a $GITHUB_OUTPUT
+          else
+            echo "target-arch=arm" | tee -a $GITHUB_OUTPUT
+            echo "bin-prefix=arm-linux-androideabi" | tee -a $GITHUB_OUTPUT
+            echo "clang-prefix=armv7a-linux-androideabi" | tee -a $GITHUB_OUTPUT
+          fi
+
+      - name: Configure and build
+        shell: bash
+        working-directory: ${{ steps.setup.outputs.out-path }}/${{env.ARCHIVE_NAME}}
+        env:
+          API_LEVEL: "24"
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_TOOLCHAIN_LLVM: ${{ steps.setup.outputs.toolchain }}/llvm/prebuilt/${{ steps.setup.outputs.kernel-arch }}/bin
+          ANDROID_TOOLCHAIN_TARET: ${{ steps.setup.outputs.toolchain }}/${{ steps.setup.outputs.target-arch }}-linux-androideabi-4.9/prebuilt/${{ steps.setup.outputs.kernel-arch }}/bin
+          COMMON_FLAGS: "-fpic -ffunction-sections -funwind-tables -fstack-protector -fno-strict-aliasing -finline-limit=64"
+        run: |
+          LIB_OUT=$(realpath ..)
+          export CPPFLAGS="${COMMON_FLAGS} -D__ANDROID_API__=${API_LEVEL}"
+          export CXXFLAGS="${COMMON_FLAGS} -frtti -fexceptions"
+          export CC=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.clang-prefix }}${API_LEVEL}-clang
+          export CXX=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.clang-prefix }}${API_LEVEL}-clang++
+          export AR=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ar
+          export AS=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-as
+          export LD=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ld
+          export RANLIB=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-ranlib
+          export STRIP=$ANDROID_TOOLCHAIN_LLVM/${{ steps.setup.outputs.bin-prefix }}-strip
+
+          echo "Set PATH to have NDK bins prior to clang (default PATH), otherwise configure picks up android-gcc which has been deprecated and removed from NDK."
+          echo "ref> https://github.com/openssl/openssl/blob/master/NOTES-ANDROID.md"
+          PATH=${ANDROID_TOOLCHAIN_LLVM}:${ANDROID_TOOLCHAIN_TARET}:$PATH
+
+          ./Configure \
+            android-${{ matrix.architecture }} \
+            no-dso \
+            no-shared \
+            no-autoload-config \
+            --prefix=${LIB_OUT} \
+            --openssldir=${LIB_OUT}/ssl
+          ./configdata.pm --dump
+          make
+          make install
+
+      - name: Upload built artifacts
+        uses: actions/upload-artifact@v4.3.1
+        with:
+          name: openssl-android-${{ matrix.architecture }}
+          path: |
+            ${{ steps.setup.outputs.out-path }}/lib
+            ${{ steps.setup.outputs.out-path }}/ssl
+            ${{ steps.setup.outputs.out-path }}/include
+
